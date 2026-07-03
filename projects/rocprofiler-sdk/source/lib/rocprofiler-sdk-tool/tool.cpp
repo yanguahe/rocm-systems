@@ -90,6 +90,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstring>
+#include <exception>
 #include <fstream>
 #include <future>
 #include <iomanip>
@@ -97,14 +98,18 @@
 #include <mutex>
 #include <optional>
 #include <shared_mutex>
+#include <stdexcept>
 #include <thread>
 #include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
 
+#include <cxxabi.h>
 #include <dlfcn.h>
+#include <execinfo.h>
 #include <sys/mman.h>
+#include <sys/syscall.h>
 #include <sys/types.h>
 #include <sys/wait.h>
 
@@ -1586,6 +1591,49 @@ initialize_logging()
         auto logging_cfg = rocprofiler::common::logging_config{.install_failure_handler = true};
         common::init_logging("ROCPROF", logging_cfg);
         FLAGS_colorlogtostderr = isatty(fileno(stderr)) == 1 ? true : false;
+
+        // [ATT-DEBUG] install a terminate handler that dumps the real uncaught
+        // exception (what()) + a backtrace before abort(), so the true crash is
+        // not masked by the signal handler's "Resource deadlock avoided".
+        std::set_terminate([]() {
+            fprintf(stderr, "\n===== [ATT-DEBUG] std::terminate on TID=%ld =====\n",
+                    (long) syscall(SYS_gettid));
+            if(auto eptr = std::current_exception())
+            {
+                try
+                {
+                    std::rethrow_exception(eptr);
+                } catch(const std::exception& e)
+                {
+                    fprintf(stderr,
+                            "[ATT-DEBUG] uncaught std::exception: type=%s what=%s\n",
+                            typeid(e).name(),
+                            e.what());
+                } catch(...)
+                {
+                    int   st  = 0;
+                    auto* tp  = abi::__cxa_current_exception_type();
+                    char* dem = tp ? abi::__cxa_demangle(tp->name(), nullptr, nullptr, &st)
+                                   : nullptr;
+                    fprintf(stderr, "[ATT-DEBUG] uncaught non-std exception: type=%s\n",
+                            dem ? dem : (tp ? tp->name() : "unknown"));
+                    free(dem);
+                }
+            }
+            else
+            {
+                fprintf(stderr, "[ATT-DEBUG] terminate with no active exception\n");
+            }
+
+            void* bt[64];
+            int   n = backtrace(bt, 64);
+            fprintf(stderr, "[ATT-DEBUG] backtrace (%d frames):\n", n);
+            backtrace_symbols_fd(bt, n, fileno(stderr));
+            fprintf(stderr, "===== [ATT-DEBUG] end =====\n");
+            fflush(stderr);
+
+            std::abort();
+        });
     }
 }
 
@@ -2799,11 +2847,18 @@ generate_output(cleanup_mode _cleanup_mode)
 
     if(tool::get_config().advanced_thread_trace)
     {
+        ROCP_WARNING << "[ATT-DEBUG] advanced_thread_trace block entered; att_library_path='"
+                     << tool::get_config().att_library_path << "'";
+
         auto decoder = rocprofiler::att_wrapper::ATTDecoder(tool::get_config().att_library_path);
+        ROCP_WARNING << "[ATT-DEBUG] ATTDecoder constructed; valid=" << decoder.valid();
         ROCP_FATAL_IF(!decoder.valid()) << "Decoder library not found!";
 
         auto codeobj     = tool_metadata->get_code_object_load_info();
         auto output_path = tool::format_path(tool::get_config().output_path);
+        ROCP_WARNING << "[ATT-DEBUG] codeobj count=" << codeobj.size()
+                     << " att_filenames count=" << tool_metadata->att_filenames.size()
+                     << " output_path=" << output_path;
 
         std::vector<std::string> perf{};
         for(auto& counter : tool::get_config().att_param_perfcounters)
@@ -2827,8 +2882,26 @@ generate_output(cleanup_mode _cleanup_mode)
             auto out_path = fmt::format("{}/{}", output_path, ui_name.str());
             auto in_path  = std::string(".");
 
-            decoder.parse(in_path, out_path, att_filename_data.second, codeobj, perf, formats);
+            ROCP_WARNING << "[ATT-DEBUG] parse() begin dispatch_id=" << dispatch_id
+                         << " shader_files=" << att_filename_data.second.size()
+                         << " out_path=" << out_path;
+            try
+            {
+                decoder.parse(
+                    in_path, out_path, att_filename_data.second, codeobj, perf, formats);
+                ROCP_WARNING << "[ATT-DEBUG] parse() OK dispatch_id=" << dispatch_id;
+            } catch(const std::exception& e)
+            {
+                ROCP_ERROR << "[ATT-DEBUG] parse() threw std::exception type="
+                           << typeid(e).name() << " what=" << e.what();
+                throw;
+            } catch(...)
+            {
+                ROCP_ERROR << "[ATT-DEBUG] parse() threw non-std exception";
+                throw;
+            }
         }
+        ROCP_WARNING << "[ATT-DEBUG] advanced_thread_trace block complete";
     }
 
     run_cleanup();
