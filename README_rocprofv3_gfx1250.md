@@ -6,6 +6,7 @@
 | `build_rocprofv3_gfx1250.sh` | 一键编译 + 安装 rocprofv3（含依赖安装、子模块、configure、build、install） |
 | `build_comgr_gfx1250.sh`     | 一键编译基于 **LLVM23** 的 comgr（反汇编 gfx1250 新指令，源码在 `comgr/`） |
 | `run_att_gfx1250.sh`         | 一键抓取 + 解码 ATT trace（内含运行时环境修复） |
+| `rocprof-trace-decoder-ubuntu-24.04-0.1.5-Linux-runtime.deb` | 支持 gfx1250 的 trace-decoder 安装包（0.1.5），见第三节 |
 > 适用环境：容器内已装 ROCm 7.12.0，采用 TheRock / python-wheel 布局
 > （真实库在 `/opt/venv/lib/python3.12/site-packages/_rocm_sdk_core/lib`，
 > `/opt/rocm/lib/*` 多为指向它的软链）。本仓库源码需 pin 在与容器运行时匹配的
@@ -48,9 +49,25 @@ bash build_comgr_gfx1250.sh
 
 ## 三、抓取 + 解码 trace
 需要一份**支持 gfx1250 的** `librocprof-trace-decoder.so`（容器自带的旧版可能不支持）。
-放到某目录后用 `DECODER_DIR` 指向它：
+本仓库根目录已附带该 decoder 的安装包（0.1.5，支持 gfx1250）：
+`rocprof-trace-decoder-ubuntu-24.04-0.1.5-Linux-runtime.deb`（内含
+`/opt/rocm/lib/librocprof-trace-decoder.so`）。
+
+**方式 A：安装 deb（推荐）**——decoder 装到 `/opt/rocm/lib`，`run_att_gfx1250.sh`
+的 `LD_LIBRARY_PATH` 已含该目录，无需再指 `DECODER_DIR`：
 ```bash
-DECODER_DIR=/path/to/new-decoder-dir \
+# 在容器内：
+dpkg -i rocprof-trace-decoder-ubuntu-24.04-0.1.5-Linux-runtime.deb
+bash run_att_gfx1250.sh -- \
+  python profile_mha_flydsl_varlen_minimal.py --causal true --return_lse true \
+    -b 1 -nh 32 -sq 1024 -sk 1024 --random-value false --warmup 5 --repeat 20
+```
+
+**方式 B：不装，只解包取 .so**——用 `DECODER_DIR` 指向含 `.so` 的目录：
+```bash
+# 解包到某目录：
+dpkg-deb -x rocprof-trace-decoder-ubuntu-24.04-0.1.5-Linux-runtime.deb /tmp/decoder
+DECODER_DIR=/tmp/decoder/opt/rocm/lib \
 bash run_att_gfx1250.sh -- \
   python profile_mha_flydsl_varlen_minimal.py --causal true --return_lse true \
     -b 1 -nh 32 -sq 1024 -sk 1024 --random-value false --warmup 5 --repeat 20
