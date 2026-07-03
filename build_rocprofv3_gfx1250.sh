@@ -72,11 +72,17 @@ git submodule update --init --recursive projects/rocprofiler-sdk
 
 # ---- 4. CMake configure -----------------------------------------------------
 echo "== [4/5] CMake configure =="
+# 关键：钉死 amd_comgr_DIR 到“真库”版 cmake 包（lib/cmake/amd_comgr，target 为
+# SHARED libamd_comgr.so.3），否则 find_package 可能命中 lib/cmake/amd_comgr_stub
+# （Implib.so lazy-load stub），运行到 ATT 解码首次调 comgr 时其隔离 dlmopen 在
+# rocprofv3 进程内失败 → abort("implib-gen: libamd_comgr.so.3 ... failed")。
+: "${AMD_COMGR_DIR:=$ROCM_PATH/lib/cmake/amd_comgr}"
 rm -rf rocprofiler-sdk-build
 cmake -B rocprofiler-sdk-build -G Ninja \
     -DCMAKE_BUILD_TYPE=Release \
     -DCMAKE_INSTALL_PREFIX="$INSTALL_PREFIX" \
     -DCMAKE_PREFIX_PATH="$ROCM_PATH;$SYSDEPS" \
+    -Damd_comgr_DIR="$AMD_COMGR_DIR" \
     -DGPU_TARGETS="$GPU_TARGETS" \
     -DROCPROFILER_BUILD_TESTS=OFF \
     -DROCPROFILER_BUILD_SAMPLES=OFF \
